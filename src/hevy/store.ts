@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -25,6 +25,12 @@ export interface UserCredentials {
 interface EnrollState {
   user: string;
   createdAt: number;
+  /**
+   * Set when the user explicitly confirmed (in their browser) which gateway identity
+   * the link is bound to: sha256 of a random nonce also stored in a cookie on that
+   * browser, so the API key is only accepted from the browser that confirmed.
+   */
+  confirmedNonceHash?: string;
 }
 
 interface Encrypted {
@@ -127,11 +133,40 @@ export class CredentialStore {
   /** Look up without consuming — used to render the form before submission. */
   peekState(state: string): string | undefined {
     this.gcStates();
-    const entry = this.states[state];
+    const entry = Object.hasOwn(this.states, state) ? this.states[state] : undefined;
     if (!entry || Date.now() - entry.createdAt > STATE_TTL_MS) {
       return undefined;
     }
     return entry.user;
+  }
+
+  /**
+   * Record the browser's explicit confirmation of the identity the state is bound to.
+   * Returns a random nonce to hand to that browser (as a cookie), or undefined if the
+   * state is invalid/expired.
+   */
+  confirmState(state: string): string | undefined {
+    if (!this.peekState(state)) {
+      return undefined;
+    }
+    const nonce = randomBytes(24).toString('base64url');
+    this.states[state]!.confirmedNonceHash = sha256Hex(nonce);
+    this.persist();
+    return nonce;
+  }
+
+  /** Whether a still-valid state was confirmed by the browser presenting `nonce`. */
+  isConfirmed(state: string, nonce: string | undefined): boolean {
+    if (!nonce || !this.peekState(state)) {
+      return false;
+    }
+    const hash = this.states[state]!.confirmedNonceHash;
+    if (!hash) {
+      return false;
+    }
+    const expected = Buffer.from(hash, 'hex');
+    const supplied = Buffer.from(sha256Hex(nonce), 'hex');
+    return expected.length === supplied.length && timingSafeEqual(expected, supplied);
   }
 
   consumeState(state: string): string | undefined {
@@ -156,4 +191,8 @@ export class CredentialStore {
       this.persist();
     }
   }
+}
+
+function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
