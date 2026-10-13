@@ -3,7 +3,7 @@ import { z } from 'zod/v4';
 import { formatUnknownError } from '../errors.js';
 import { writeAuditEvent } from '../hevy/audit.js';
 import { HEVY_CAPABILITIES, READ_ANNOTATIONS, REPLACE_ANNOTATIONS, WRITE_ANNOTATIONS, searchCapabilities } from '../hevy/capabilities.js';
-import type { HevyClient } from '../hevy/client.js';
+import { type HevyClient, pathSegment } from '../hevy/client.js';
 import { assertWritesEnabled, requireUser } from '../hevy/policy.js';
 import type { CredentialStore } from '../hevy/store.js';
 
@@ -94,7 +94,7 @@ export function registerHevyTools(
           alreadyConnected: Boolean(store.get(u)),
           enrollmentUrl: `${base}/hevy/enroll?state=${state}`,
           instructions:
-            'Open enrollmentUrl in your browser and paste your Hevy API key (hevy.com/settings?developer, requires Hevy Pro). The link is single-use and expires in 10 minutes.',
+            'Open enrollmentUrl in your browser, check that it shows YOUR identity and confirm, then paste your Hevy API key (hevy.com/settings?developer, requires Hevy Pro). The link is single-use and expires in 10 minutes.',
         });
       }),
   );
@@ -129,7 +129,7 @@ export function registerHevyTools(
   server.registerTool(
     'hevy_get_workout',
     { title: 'Get Workout', description: 'One workout by id.', inputSchema: { workoutId: z.string().min(1) }, annotations: READ_ANNOTATIONS },
-    async input => run('hevy_get_workout', options, input, async () => json(await call('GET', `/v1/workouts/${encodeURIComponent(input.workoutId)}`))),
+    async input => run('hevy_get_workout', options, input, async () => json(await call('GET', `/v1/workouts/${pathSegment(input.workoutId)}`))),
   );
 
   server.registerTool(
@@ -149,7 +149,7 @@ export function registerHevyTools(
     { title: 'Exercise History', description: 'Every recorded set for one exercise template over time — the right tool for judging progression on a specific lift.', inputSchema: { exerciseTemplateId: z.string().min(1), startDate: z.string().optional().describe('ISO 8601 UTC'), endDate: z.string().optional() }, annotations: READ_ANNOTATIONS },
     async input =>
       run('hevy_get_exercise_history', options, input, async () =>
-        json(await call('GET', `/v1/exercise_history/${encodeURIComponent(input.exerciseTemplateId)}`, { query: { start_date: input.startDate, end_date: input.endDate } })),
+        json(await call('GET', `/v1/exercise_history/${pathSegment(input.exerciseTemplateId)}`, { query: { start_date: input.startDate, end_date: input.endDate } })),
       ),
   );
 
@@ -164,7 +164,7 @@ export function registerHevyTools(
   server.registerTool(
     'hevy_get_routine',
     { title: 'Get Routine', description: 'One routine by id. Always fetch this before hevy_update_routine — updates replace the entire routine.', inputSchema: { routineId: z.string().min(1) }, annotations: READ_ANNOTATIONS },
-    async input => run('hevy_get_routine', options, input, async () => json(await call('GET', `/v1/routines/${encodeURIComponent(input.routineId)}`))),
+    async input => run('hevy_get_routine', options, input, async () => json(await call('GET', `/v1/routines/${pathSegment(input.routineId)}`))),
   );
 
   server.registerTool(
@@ -209,7 +209,7 @@ export function registerHevyTools(
   server.registerTool(
     'hevy_get_exercise_template',
     { title: 'Get Exercise Template', description: 'One exercise template by id.', inputSchema: { exerciseTemplateId: z.string().min(1) }, annotations: READ_ANNOTATIONS },
-    async input => run('hevy_get_exercise_template', options, input, async () => json(await call('GET', `/v1/exercise_templates/${encodeURIComponent(input.exerciseTemplateId)}`))),
+    async input => run('hevy_get_exercise_template', options, input, async () => json(await call('GET', `/v1/exercise_templates/${pathSegment(input.exerciseTemplateId)}`))),
   );
 
   server.registerTool(
@@ -282,7 +282,7 @@ export function registerHevyTools(
       run('hevy_update_workout', options, input, async () => {
         assertWritesEnabled('hevy_update_workout');
         const { workoutId, title, start_time, end_time, description, is_private, exercises } = input;
-        return json(await call('PUT', `/v1/workouts/${encodeURIComponent(workoutId)}`, { body: { workout: { title, start_time, end_time, description: description ?? null, is_private, exercises } } }));
+        return json(await call('PUT', `/v1/workouts/${pathSegment(workoutId)}`, { body: { workout: { title, start_time, end_time, description: description ?? null, is_private, exercises } } }));
       }),
   );
 
@@ -326,7 +326,7 @@ export function registerHevyTools(
       run('hevy_update_routine', options, input, async () => {
         assertWritesEnabled('hevy_update_routine');
         const { routineId, title, folder_id, notes, exercises } = input;
-        return json(await call('PUT', `/v1/routines/${encodeURIComponent(routineId)}`, { body: { routine: { title, folder_id: folder_id ?? null, notes: notes ?? null, exercises } } }));
+        return json(await call('PUT', `/v1/routines/${pathSegment(routineId)}`, { body: { routine: { title, folder_id: folder_id ?? null, notes: notes ?? null, exercises } } }));
       }),
   );
 

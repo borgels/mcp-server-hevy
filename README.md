@@ -20,7 +20,8 @@ without one.
 The key never passes through the conversation. Instead:
 
 1. Ask Claude to connect Hevy → `hevy_connect` returns a one-time link
-2. Open it, paste the Hevy API key into the form, submit
+2. Open it, check that it shows **your** gateway identity, tick the confirmation
+   box, then paste the Hevy API key into the form and submit
 3. The server validates it against Hevy before storing it, so a wrong key fails
    immediately rather than as a confusing 401 later
 
@@ -28,7 +29,10 @@ The key is found at **hevy.com/settings?developer** — in a *browser*, not the
 mobile app.
 
 This mirrors `mcp-server-garmin`: the enrollment route is reached directly
-(bypassing the gateway) and is secured by a single-use, user-bound state token.
+(bypassing the gateway) and is secured by a single-use, user-bound state token
+plus an explicit identity confirmation that is bound to the confirming browser
+(HttpOnly cookie), so a link opened by someone else cannot silently attach their
+key to another identity.
 Unlike an OAuth code, a Hevy API key is long-lived, which is exactly why it
 shouldn't sit in a chat transcript.
 
@@ -82,8 +86,14 @@ HEVY_TRUST_FORWARDED_USER=true
 HEVY_ENABLE_WRITES=true
 HEVY_AUDIT_LOG=
 HEVY_TIMEOUT_MS=30000
-MCP_HTTP_TOKEN=
+MCP_HTTP_TOKEN=             # REQUIRED with HEVY_TRUST_FORWARDED_USER=true (see below)
 ```
+
+`MCP_HTTP_TOKEN` is the shared bearer the gateway sends on `/mcp`
+(`Authorization: Bearer <token>`), compared in constant time. When
+`HEVY_TRUST_FORWARDED_USER=true` the server **refuses to start** without it,
+because otherwise anyone who can reach the port could claim any `X-MCP-User`.
+Keep `/mcp` reachable only from the gateway.
 
 No app-level API credentials exist — every credential is per user.
 

@@ -139,3 +139,16 @@ function backoffMs(attempt: number): number {
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+/**
+ * Encode caller-supplied input for use as a single URL path segment. Rejects values
+ * that could change which endpoint is addressed (empty, dot segments, separators,
+ * query/fragment markers, or their percent-encoded forms) before encoding.
+ */
+export function pathSegment(value: string): string {
+  const v = String(value);
+  if (v === '' || v === '.' || v === '..' || /[/\\?#]/.test(v) || /%(2e|2f|5c)/i.test(v)) {
+    throw new Error(`Invalid id: ${JSON.stringify(v.slice(0, 64))}`);
+  }
+  return encodeURIComponent(v);
+}
