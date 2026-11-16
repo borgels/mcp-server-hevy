@@ -3,11 +3,11 @@
 MCP server for the [Hevy](https://hevy.com) strength-training API — workouts,
 routines, exercise history and progression data.
 
-Self-hosted alternative to the public hosted Hevy MCP, built to the same shape
-as our other personal connectors: one shared instance, per-user credentials
-encrypted at rest, access gated by the identity the gateway verifies.
+Self-hosted alternative to the public hosted Hevy MCP: one shared instance,
+per-user credentials encrypted at rest, access gated by the identity an
+authenticating gateway verifies.
 
-Independent, unofficial project. Not affiliated with Hevy.
+This is an independent, unofficial project. It is not developed, endorsed or supported by Hevy.
 
 ## Requirements
 
@@ -28,8 +28,8 @@ The key never passes through the conversation. Instead:
 The key is found at **hevy.com/settings?developer** — in a *browser*, not the
 mobile app.
 
-This mirrors `mcp-server-garmin`: the enrollment route is reached directly
-(bypassing the gateway) and is secured by a single-use, user-bound state token
+The enrollment route is reached directly by the browser (through a reverse
+proxy, without the `/mcp` bearer) and is secured by a single-use, user-bound state token
 plus an explicit identity confirmation that is bound to the confirming browser
 (HttpOnly cookie), so a link opened by someone else cannot silently attach their
 key to another identity.
@@ -71,9 +71,9 @@ These are properties of Hevy's API, not choices made here:
 ## Body measurements are read-only, deliberately
 
 Hevy can store body weight and composition, and its API can write them — this
-server intentionally doesn't. **Withings is the source of truth** for body
-metrics in our setup; writing them here too would create a second competing
-record with no defined winner. Reading is exposed so existing Hevy data stays
+server intentionally doesn't. Body metrics are expected to come from a
+dedicated source such as a smart scale; writing them here too would create a
+second competing record with no defined winner. Reading is exposed so existing Hevy data stays
 visible.
 
 ## Configuration
@@ -85,17 +85,52 @@ HEVY_PUBLIC_BASE_URL=       # public origin, used to build the enrollment link
 HEVY_TRUST_FORWARDED_USER=true
 HEVY_ENABLE_WRITES=true
 HEVY_AUDIT_LOG=
-HEVY_TIMEOUT_MS=30000
-MCP_HTTP_TOKEN=             # REQUIRED with HEVY_TRUST_FORWARDED_USER=true (see below)
+HEVY_TIMEOUT_MS=30000       # upstream request timeout, 1-600000 ms
+MCP_HTTP_TOKEN=             # REQUIRED with HEVY_TRUST_FORWARDED_USER=true or a non-loopback bind (see below)
 ```
 
+HTTP transport (`node dist/http.js`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_HTTP_HOST` / `HOST` | `127.0.0.1` | Bind address. |
+| `PORT` | `3000` | Listen port (1-65535). |
+| `MCP_HTTP_TOKEN` | - | Bearer token required on `/mcp`; at least 32 printable ASCII characters. |
+| `MCP_HTTP_ALLOW_UNAUTHENTICATED` | `false` | Serve `/mcp` without a token on a non-loopback bind or with `MCP_ALLOW_ANY_ORIGIN` (logs a warning). Never allowed together with `HEVY_TRUST_FORWARDED_USER=true`. |
+| `MCP_MAX_BODY_BYTES` | `10485760` | Largest accepted `/mcp` request body. |
+| `MCP_ALLOWED_ORIGINS` | localhost origins | Comma-separated exact `Origin` values allowed on `/mcp`. |
+| `MCP_ALLOW_ANY_ORIGIN` | `false` | Allow any `Origin`; requires `MCP_HTTP_TOKEN`. |
+| `MCP_ALLOWED_HOSTS` | see below | Comma-separated host names accepted in the `Host` header on `/mcp`. |
+| `MCP_AUTH_FAILURE_LIMIT` | `20` | Failed `/mcp` authentications per client address and window before further failures get 429; `0` disables. |
+| `MCP_AUTH_FAILURE_WINDOW_MS` | `60000` | Window for the limit above. |
+
 `MCP_HTTP_TOKEN` is the shared bearer the gateway sends on `/mcp`
-(`Authorization: Bearer <token>`), compared in constant time. When
-`HEVY_TRUST_FORWARDED_USER=true` the server **refuses to start** without it,
-because otherwise anyone who can reach the port could claim any `X-MCP-User`.
-Keep `/mcp` reachable only from the gateway.
+(`Authorization: Bearer <token>`), compared in constant time. The server
+**refuses to start** without it when `HEVY_TRUST_FORWARDED_USER=true` (otherwise
+anyone who can reach the port could claim any `X-MCP-User`), when bound to a
+non-loopback address, or with `MCP_ALLOW_ANY_ORIGIN=true`. Generate one with
+`openssl rand -hex 32`. Invalid numbers or booleans in these variables stop the
+server at startup instead of being ignored.
+
+On a loopback bind, `/mcp` only accepts `localhost`, `127.0.0.1`, `[::1]` or
+the bind address in the `Host` header (DNS-rebinding protection); set
+`MCP_ALLOWED_HOSTS` to change this. `/healthz` and `/hevy/enroll` need no
+bearer. Keep `/mcp` reachable only from the gateway.
 
 No app-level API credentials exist — every credential is per user.
+
+## Security model
+
+- Each user links their own Hevy API key; tools only act on the key stored for
+  the identity in `X-MCP-User`. That header is only trusted with
+  `HEVY_TRUST_FORWARDED_USER=true`, and only behind `MCP_HTTP_TOKEN`.
+- User authentication and authorization belong in an identity-aware gateway in
+  front of this server: it signs the user in, sets `X-MCP-User` and holds the
+  bearer token. This server does not authenticate end users itself.
+- Tool access is not data access: whoever can call `/mcp` with the bearer and a
+  given `X-MCP-User` value acts as that user against Hevy.
+- The HTTP server does not terminate TLS. Put it behind a TLS-terminating proxy
+  or keep it on a private network.
 
 ## Verification
 

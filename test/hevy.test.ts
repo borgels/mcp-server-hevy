@@ -208,3 +208,38 @@ describe('secret redaction', () => {
     expect(redactSecrets('HEVY_API_KEY=abcdef123456')).toContain('[REDACTED]');
   });
 });
+
+describe('HevyClient hardening', () => {
+  it('never follows redirects, so the api-key header stays on the API origin', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(null, { status: 307, headers: { location: 'https://elsewhere.example/v1/user/info' } }),
+    );
+    const client = new HevyClient({ fetchImpl: fetchMock as unknown as typeof fetch, maxRetries: 0 });
+    await expect(client.verifyKey('k-secret')).rejects.toThrow(/redirect/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.redirect).toBe('manual');
+  });
+
+  it('rejects an invalid HEVY_TIMEOUT_MS instead of using NaN', () => {
+    process.env.HEVY_TIMEOUT_MS = '30s';
+    expect(() => new HevyClient()).toThrow(/HEVY_TIMEOUT_MS/);
+    process.env.HEVY_TIMEOUT_MS = '0';
+    expect(() => new HevyClient()).toThrow(/HEVY_TIMEOUT_MS/);
+    process.env.HEVY_TIMEOUT_MS = '5000';
+    expect(() => new HevyClient()).not.toThrow();
+  });
+
+  it('removes the key from error bodies before truncating them', async () => {
+    const key = 'k-0123456789-secret';
+    const body = `${'x'.repeat(190)} ${key} ${'y'.repeat(100_000)}`;
+    const client = new HevyClient({
+      fetchImpl: (async () => new Response(body, { status: 400 })) as unknown as typeof fetch,
+      maxRetries: 0,
+    });
+    const error = (await client.verifyKey(key).catch((e: unknown) => e)) as Error;
+    expect(error.message).toContain('HTTP 400');
+    expect(error.message).not.toContain('k-0123');
+    expect(error.message.length).toBeLessThan(400);
+  });
+});

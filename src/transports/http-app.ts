@@ -3,11 +3,14 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { createServer as createMcpServer } from '../server.js';
 import type { HevyClient } from '../hevy/client.js';
 import type { CredentialStore } from '../hevy/store.js';
-import { trustForwardedUser } from '../hevy/policy.js';
 import {
+  assertAllowedHost,
   assertAllowedOrigin,
   assertAuthorized,
+  AuthFailureLimiter,
   corsHeaders,
+  DEFAULT_AUTH_FAILURE_LIMIT,
+  DEFAULT_AUTH_FAILURE_WINDOW_MS,
   escapeHtml,
   type HttpConfig,
   HttpRequestError,
@@ -21,6 +24,8 @@ export interface HttpAppDeps {
   client: HevyClient;
   /** Public origin of the enrollment page; an https origin marks the cookie Secure. */
   publicBaseUrl?: string;
+  /** Defaults to console.error. */
+  log?: (line: string) => void;
 }
 
 /** Cookie binding the browser that confirmed the identity to the API-key submission. */
@@ -29,60 +34,95 @@ const ENROLL_COOKIE_MAX_AGE_S = 10 * 60;
 
 export function createHttpHandler(deps: HttpAppDeps): RequestListener {
   const { config, store, client } = deps;
+  const log = deps.log ?? ((line: string) => console.error(line));
+  const failureLimit = config.authFailureLimit ?? DEFAULT_AUTH_FAILURE_LIMIT;
+  const limiter = failureLimit > 0
+    ? new AuthFailureLimiter(failureLimit, config.authFailureWindowMs ?? DEFAULT_AUTH_FAILURE_WINDOW_MS)
+    : undefined;
+
   return async (req, res) => {
+    const remote = req.socket.remoteAddress ?? 'unknown';
+    const describeRequest = () => `${req.method ?? '-'} ${(req.url ?? '').split('?')[0]!.slice(0, 200)} from ${remote}`;
     try {
       const url = new URL(req.url ?? '/', 'http://localhost');
 
-      // Enrollment form — reached DIRECTLY by the user's browser (Caddy routes
-      // /hevy/* to this container, bypassing the gateway), so it must not
-      // require the gateway bearer. Security comes from the single-use,
-      // user-bound state token plus an explicit, browser-bound identity confirmation.
+      // Enrollment form: reached directly by the user's browser through a
+      // reverse proxy, not by the MCP client, so it does not require the /mcp
+      // bearer. Security comes from the single-use, user-bound state token plus
+      // an explicit, browser-bound identity confirmation.
       if (url.pathname === '/hevy/enroll') {
         await handleEnroll(req, res, url, deps);
         return;
       }
 
       if (url.pathname === '/healthz') {
-        sendJson(res, 200, { ok: true }, req);
+        sendJson(res, 200, { ok: true });
         return;
       }
 
       if (url.pathname !== '/mcp') {
-        sendJson(res, 404, { error: 'Not found' }, req);
-        return;
+        throw new HttpRequestError(404, 'Not found');
       }
 
-      assertAllowedOrigin(req);
+      assertAllowedHost(req, config);
+      assertAllowedOrigin(req, config);
       if (req.method === 'OPTIONS') {
-        res.writeHead(204, corsHeaders(req));
+        res.writeHead(204, corsHeaders(req, config));
         res.end();
         return;
       }
       if (req.method !== 'POST') {
-        sendJson(res, 405, { error: 'Method not allowed' }, req, { Allow: 'POST' });
-        return;
+        throw new HttpRequestError(405, 'Method not allowed', { headers: { Allow: 'POST, OPTIONS' } });
       }
 
-      assertAuthorized(req, config);
+      try {
+        assertAuthorized(req, config);
+      } catch (error) {
+        // Only failing requests are counted and throttled; a valid token is never blocked.
+        if (limiter) {
+          const retryAfter = limiter.retryAfterSeconds(remote);
+          if (retryAfter > 0) {
+            sendJson(res, 429, { error: 'Too many failed authentication attempts' }, req, {
+              'Retry-After': String(retryAfter),
+            }, config);
+            return;
+          }
+          if (limiter.recordFailure(remote)) {
+            log(`[http] ${remote} reached ${failureLimit} failed authentication attempts; further failures get 429`);
+          }
+        }
+        throw error;
+      }
+
       const body = await readJsonBody(req, config.maxBodyBytes);
-      const forwardedUser = trustForwardedUser() ? firstHeader(req.headers['x-mcp-user']) : undefined;
+      const forwardedUser = config.trustForwardedUser ? firstHeader(req.headers['x-mcp-user']) : undefined;
 
       const mcpServer = createMcpServer({ client, store, onBehalfOf: forwardedUser });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await mcpServer.connect(transport);
-      await transport.handleRequest(req, res, body);
       res.on('close', () => {
         void transport.close();
         void mcpServer.close();
       });
+      for (const [name, value] of Object.entries(corsHeaders(req, config))) {
+        res.setHeader(name, value);
+      }
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, body);
     } catch (error) {
-      console.error(error);
-      if (!res.headersSent) {
-        if (error instanceof HttpRequestError) {
-          sendJson(res, error.status, { error: error.message }, req);
-          return;
+      if (error instanceof HttpRequestError) {
+        log(`[http] ${error.status} ${describeRequest()}: ${error.message}`);
+        if (!res.headersSent && !res.destroyed) {
+          const payload = error.jsonRpcCode === undefined
+            ? { error: error.message }
+            : { jsonrpc: '2.0', error: { code: error.jsonRpcCode, message: error.message }, id: null };
+          sendJson(res, error.status, payload, req, error.headers, config);
         }
-        sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }, req);
+        return;
+      }
+
+      log(`[http] 500 ${describeRequest()}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      if (!res.headersSent && !res.destroyed) {
+        sendJson(res, 500, { jsonrpc: '2.0', error: { code: -32603, message: 'Internal server error' }, id: null }, req, {}, config);
       }
     }
   };
@@ -227,13 +267,20 @@ function html(res: ServerResponse, status: number, body: string, extra: Record<s
 async function readRawBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
-  for await (const chunk of req) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buf.byteLength;
-    if (total > 64 * 1024) {
-      throw new HttpRequestError(413, 'Payload too large');
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.byteLength;
+      if (total > 64 * 1024) {
+        throw new HttpRequestError(413, 'Payload too large');
+      }
+      chunks.push(buf);
     }
-    chunks.push(buf);
+  } catch (error) {
+    if (error instanceof HttpRequestError) {
+      throw error;
+    }
+    throw new HttpRequestError(400, 'Request body could not be read (connection aborted)');
   }
   return Buffer.concat(chunks).toString('utf8');
 }
