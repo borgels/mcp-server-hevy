@@ -38,11 +38,12 @@ function formatHevyHttpError(input: { status: number; url: string; payload?: unk
       : input.status === 429
         ? 'Hevy rate limit hit. Wait a moment and retry.'
         : undefined;
+  // Redact before truncating, so a cut cannot leave part of a secret unmatched.
   const payloadText =
     typeof input.payload === 'string'
-      ? input.payload.slice(0, 200)
+      ? redactSecrets(input.payload).slice(0, 200)
       : input.payload
-        ? JSON.stringify(input.payload).slice(0, 200)
+        ? redactSecrets(JSON.stringify(input.payload)).slice(0, 200)
         : undefined;
   return redactSecrets(
     [`Hevy API request failed with HTTP ${input.status}`, payloadText, hint, input.fallbackMessage].filter(Boolean).join(' | '),
