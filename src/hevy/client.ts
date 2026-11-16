@@ -1,3 +1,4 @@
+import { readEnvInteger } from '../config-env.js';
 import { HevyHttpError } from '../errors.js';
 import type { CredentialStore } from './store.js';
 
@@ -25,6 +26,9 @@ export interface RequestOptions {
  * Retries are deliberately GET-only: Hevy has no idempotency mechanism, so a
  * retried POST silently creates a duplicate workout/routine. Transient
  * failures on writes are surfaced to the caller instead.
+ *
+ * Redirects are never followed (`redirect: 'manual'`), so the `api-key`
+ * header cannot be forwarded to another host; a 3xx is reported as an error.
  */
 export class HevyClient {
   private readonly baseUrl: string;
@@ -39,7 +43,7 @@ export class HevyClient {
       throw new Error(`Refusing non-https Hevy base URL: ${this.baseUrl}`);
     }
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.HEVY_TIMEOUT_MS ?? 30_000);
+    this.timeoutMs = options.timeoutMs ?? readEnvInteger('HEVY_TIMEOUT_MS', 30_000, { min: 1, max: 600_000 });
     this.maxRetries = options.maxRetries ?? 2;
   }
 
@@ -86,6 +90,7 @@ export class HevyClient {
             ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
           },
           body: options.body === undefined ? undefined : JSON.stringify(options.body),
+          redirect: 'manual',
           signal: AbortSignal.timeout(this.timeoutMs),
         });
       } catch (error) {
@@ -105,7 +110,18 @@ export class HevyClient {
         return (text ? JSON.parse(text) : undefined) as T;
       }
 
-      const payload = await res.text().catch(() => '');
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel().catch(() => undefined);
+        throw new HevyHttpError({
+          status: res.status,
+          url: url.toString(),
+          fallbackMessage: 'Hevy responded with a redirect; redirects are not followed so the API key is never sent elsewhere.',
+        });
+      }
+
+      // Error bodies are capped and the key is removed by value before any truncation.
+      const raw = await readTextUpTo(res, MAX_ERROR_BODY_BYTES);
+      const payload = apiKey ? raw.split(apiKey).join('[REDACTED]') : raw;
       const retryable = res.status === 429 || res.status === 408 || res.status >= 500;
       if (retryable && attempt < attempts - 1) {
         await delay(retryAfterMs(res) ?? backoffMs(attempt));
@@ -116,6 +132,33 @@ export class HevyClient {
 
     throw lastError instanceof Error ? lastError : new Error('Hevy request failed');
   }
+}
+
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/** Reads at most `limit` bytes of a response body as text and discards the rest. */
+async function readTextUpTo(res: Response, limit: number): Promise<string> {
+  if (!res.body) {
+    return '';
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < limit) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } catch {
+    // A body that fails mid-read is reported with what arrived.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks).subarray(0, limit).toString('utf8');
 }
 
 /** Hevy may send Retry-After as seconds or an HTTP date. */
