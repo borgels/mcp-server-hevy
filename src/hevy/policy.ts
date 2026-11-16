@@ -2,10 +2,6 @@ export function writesEnabled(): boolean {
   return process.env.HEVY_ENABLE_WRITES === 'true';
 }
 
-export function trustForwardedUser(): boolean {
-  return process.env.HEVY_TRUST_FORWARDED_USER === 'true';
-}
-
 export function assertWritesEnabled(action: string): void {
   if (!writesEnabled()) {
     throw new Error(`Write access is disabled on this Hevy MCP instance (${action}). Set HEVY_ENABLE_WRITES=true.`);
