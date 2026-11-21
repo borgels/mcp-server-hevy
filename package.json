@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-hevy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for the Hevy strength-training API, with per-user API keys and browser-based enrollment.",
   "type": "module",
   "main": "./dist/stdio.js",
@@ -11,6 +11,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "CHANGELOG.md",
     ".env.example"
   ],
@@ -38,7 +39,7 @@
     "fitness"
   ],
   "author": "",
-  "license": "Apache-2.0",
+  "license": "FSL-1.1-ALv2",
   "engines": {
     "node": ">=20.11"
   },
